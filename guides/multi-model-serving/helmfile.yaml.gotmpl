@@ -1,0 +1,133 @@
+environments:
+  istio: &I
+    values:
+      - ../prereq/gateway-provider/common-configurations/istio.yaml
+  kgateway: &KG
+    values:
+      - ../prereq/gateway-provider/common-configurations/kgateway.yaml
+  agentgateway: &AG
+    values:
+      - ../prereq/gateway-provider/common-configurations/agentgateway.yaml
+  gke: &GKE
+    values:
+      - ../prereq/gateway-provider/common-configurations/gke.yaml
+  gke_tpu: &GKETPU
+    <<: *GKE
+  standalone: &STANDALONE
+    values:
+      - provider:
+          name: none
+  amd: &AMD
+    <<: *I
+  xpu: &XPU
+    <<: *I
+  hpu: &HPU
+    <<: *I
+  cpu: &CPU
+    <<: *I
+  digitalocean: &DO
+    <<: *I
+  default: &DEFAULT
+    <<: *I
+
+---
+
+{{- $ns := .Namespace | default "llm-d-multi-model" -}}
+{{- $rn := (env "RELEASE_NAME_POSTFIX") | default "multi-model" -}}
+
+repositories:
+  - name: llm-d-modelservice
+    url: https://llm-d-incubation.github.io/llm-d-modelservice/
+  - name: llm-d-infra
+    url: https://llm-d-incubation.github.io/llm-d-infra/
+
+releases:
+{{- if ne .Environment.Name "standalone" }}
+  - name: {{ printf "infra-%s" $rn | quote }}
+    namespace: {{ $ns }}
+    chart: llm-d-infra/llm-d-infra
+    version: v1.3.6
+    installed:  true
+    labels:
+      type: infrastructure
+      kind: inference-stack
+    values:
+      - gateway:
+          {{ .Environment.Values.gateway | toYaml | nindent 10 }}
+{{- end }}
+
+  - name: {{ printf "gaie-%s" $rn | quote }}
+    namespace: {{ $ns }}
+    chart: oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool
+    version: v1.3.1
+    installed: true
+    needs:
+      {{- if ne .Environment.Name "standalone" }}
+      - {{ printf "infra-%s" $rn | quote }}
+      {{- end }}
+    values:
+      {{- if eq .Environment.Name "standalone" }}
+      - standalone-inference-scheduling/values.yaml
+      {{- else if eq (env "INFERENCE_SERVER") "sglang" }}
+      - gaie-multi-model/values_sglang.yaml
+      {{- else }}
+      - gaie-multi-model/values.yaml
+      {{- end }}
+    # Apply provider name if on GKE
+    {{- if or (eq .Environment.Name "gke") (eq .Environment.Name "gke_tpu") }}
+      - provider:
+          name: {{ .Environment.Values.provider.name }}
+        inferenceExtension:
+          monitoring:
+            prometheus:
+              enabled: true
+    {{- end }}
+    # Apply destination rule for anything istio
+    {{- if or (eq .Environment.Name "istio") (eq .Environment.Name "default") (eq .Environment.Name "amd") (eq .Environment.Name "xpu") (eq .Environment.Name "hpu") (eq .Environment.Name "cpu") }}
+      - provider:
+          name: {{ .Environment.Values.provider.name }}
+          istio:
+            {{ .Environment.Values.provider.istio | toYaml | nindent 12 }}
+      - provider:
+          istio:
+            destinationRule:
+              host: {{ printf "gaie-%s-epp.%s.svc.cluster.local" $rn $ns | quote }}
+    {{- end }}
+    labels:
+      kind: inference-stack
+
+  - name: {{ printf "ms-%s" $rn | quote }}
+    namespace: {{ $ns }}
+    chart: llm-d-modelservice/llm-d-modelservice
+    version: v0.4.7
+    installed: true
+    needs:
+      {{- if ne .Environment.Name "standalone" }}
+      - {{ printf "infra-%s" $rn | quote }}
+      {{- end }}
+      - {{ printf "gaie-%s" $rn | quote }}
+    values:
+    {{- if eq .Environment.Name "gke_tpu" }}
+      - ms-multi-model/values_tpu.yaml
+    {{- else if eq .Environment.Name "amd" }}
+      - ms-multi-model/values_amd.yaml
+    {{- else if eq .Environment.Name "xpu" }}
+      - ms-multi-model/values_xpu.yaml
+    {{- else if eq .Environment.Name "hpu" }}
+      - ms-multi-model/values-hpu.yaml
+    {{- else if eq .Environment.Name "cpu" }}
+      - ms-multi-model/values_cpu.yaml
+    {{- else if eq .Environment.Name "digitalocean" }}
+      - ms-multi-model/digitalocean-values.yaml
+    {{- else if eq (env "INFERENCE_SERVER") "sglang" }}
+      - ms-multi-model/values_sglang.yaml
+    {{- else }}
+      - ms-multi-model/values.yaml
+    {{- end }}
+    set:
+    {{- if or (eq .Environment.Name "gke") (eq .Environment.Name "gke_tpu") }}
+      - name: "decode.monitoring.podmonitor.enabled"
+        value: false
+    {{- end }}
+    labels:
+      kind: inference-stack

@@ -39,3 +39,4 @@ inferencePool:
     matchLabels:
       llm-d.ai/inference-serving: "true"
       llm-d.ai/guide: "multi-model"
+      llm-d.ai/model: "Qwen3-32B"

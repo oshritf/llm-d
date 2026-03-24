@@ -14,7 +14,7 @@ A modern AI platform often needs to deploy multiple base LLMs simultaneously. Fo
 
 Furthermore, each of these base models may host multiple fine-tuned **LoRA adapters** (e.g., `ski-resorts`, `movie-critique`). LoRAs associated with the same base model must be routed to the specific backend inference server hosting that base model. 
 
-Since clients interact with a single unified endpoint and specify the requested model/LoRA in the JSON payload (e.g., `"model": "deepseek/vllm-deepseek-r1", `"model": "ski-resorts"`), the routing layer must intelligently inspect the request body and schedule the inference accordingly.
+Since clients interact with a single unified endpoint and specify the requested model/LoRA in the JSON payload (e.g., `"model": "deepseek/Deepseek-r1", `"model": "ski-resorts"`), the routing layer must intelligently inspect the request body and schedule the inference accordingly.
 
 ---
 
@@ -33,11 +33,6 @@ Since clients interact with a single unified endpoint and specify the requested 
 
 * [Create the `llm-d-hf-token` secret in your target namespace with the key `HF_TOKEN` matching a valid HuggingFace token](../prereq/client-setup/README.md#huggingface-token) to pull models.
 * [Choose an llm-d version](../prereq/client-setup/README.md#llm-d-version)
-* Set the gateway extensions version
-
-```bash
-  export IGW_CHART_VERSION=v1.3.1
-```
 
 ## Installation
 
@@ -99,13 +94,34 @@ The Body-Based Router (BBR) acts as the intelligent dispatcher. It extracts the 
 
 > **Note:** All base model and LoRA names must be globally unique across your deployment.
 
-Choose your Gateway provider and deploy the BBR via Helm:
+* Set the gateway extensions version
+Check for Gateway API Inference Extension version used in the deployment helmfile
+```bash
+export IGW_CHART_VERSION=$(helm get metadata gaie-multi-model -n $NAMESPACE -o json 2>/dev/null | \
+  jq -r '.version // empty')
+```
+or look for latest available version as a fallback if it does not exists
+```bash
+  export IGW_CHART_VERSION=$(curl -s https://api.github.com/repos/kubernetes-sigs/gateway-api-inference-extension/releases \
+  | jq -r '.[] | select(.prerelease == false) | .tag_name' \
+  | sort -V \
+  | tail -n1)
+```
+
+* Identify your gateway name
+```bash
+export GATEWAY_NAME=$(kubectl get gateway -n $NAMESPACE -o jsonpath='{.items[0].metadata.name}')
+```
+
+* Choose your Gateway provider and deploy the BBR via Helm:
 
 ```bash
 export GATEWAY_PROVIDER=istio # Options: gke, istio, or none
 
 helm install body-based-router \
   --set provider.name=$GATEWAY_PROVIDER \
+  --set inferenceGateway.name=$GATEWAY_NAME \
+  --set bbr.plugins=null \
   --version $IGW_CHART_VERSION \
   oci://us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/charts/body-based-routing
 ```
@@ -133,17 +149,12 @@ helm upgrade gaie-multi-model \
   --set "inferencePool.modelServers.matchLabels.llm-d\.ai/model=Qwen3-32B" \
   --set experimentalHttpRoute.enabled=true \
   --set experimentalHttpRoute.baseModel=Qwen/Qwen3-32B \
-  --set experimentalHttpRoute.inferenceGatewayName=infra-multi-model-inference-gateway
+  --set experimentalHttpRoute.inferenceGatewayName=$GATEWAY_NAME
 ```
+
 Make sure you can select the model node (used by the InferencePool):
 ```bash
 kubectl get pods -l llm-d.ai/model=Qwen3-32B
-```
-
-Update HTTPRoute to use Model instead of Base-Model (Body Based Router v1.3.1 uses X-Gateway-Model-Name, not X-Gateway-Base-Model-Name)
-```bash
-kubectl edit httproute gaie-multi-model
-Search for X-Gateway-Base-Model-Name and update to X-Gateway-Model-Name, save and exit
 ```
 
 Verify all pods are up and running, and that you now have one InferencePool and one HttpRoute configured
@@ -194,13 +205,7 @@ helm install vllm-deepseek-r1 \
   --set provider.name=$GATEWAY_PROVIDER \
   --set experimentalHttpRoute.enabled=true \
   --set experimentalHttpRoute.baseModel=deepseek/DeepSeek-r1 \
-  --set experimentalHttpRoute.inferenceGatewayName=infra-multi-model-inference-gateway
-```
-
-Update HTTPRoute to use Model instead of Base-Model (Body Based Router v1.3.1 uses X-Gateway-Model-Name, not X-Gateway-Base-Model-Name)
-```bash
-kubectl edit httproute vllm-deepseek-r1
-Search for X-Gateway-Base-Model-Name and update to X-Gateway-Model-Name, save and exit
+  --set experimentalHttpRoute.inferenceGatewayName=$GATEWAY_NAME
 ```
 
 **Verification:**
@@ -351,14 +356,9 @@ helm uninstall ms-multi-model -n ${NAMESPACE}
 
 **_NOTE:_** If you set the `$RELEASE_NAME_POSTFIX` environment variable, your release names will be different from the command above: `infra-$RELEASE_NAME_POSTFIX`, `gaie-$RELEASE_NAME_POSTFIX` and `ms-$RELEASE_NAME_POSTFIX`.
 
-### Cleanup BodyBasedRouter and Second model
+Cleanup BodyBasedRouter and Second model:
 ```bash
 helm uninstall body-based-router
 helm uninstall vllm-deepseek-r1
-```
-
-Follow provider specific instructions for deleting the second model:
-
-```bash
 kubectl delete -f mdeepseek.yaml  -n ${NAMESPACE}
 ```
